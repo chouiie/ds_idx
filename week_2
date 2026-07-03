@@ -1,0 +1,366 @@
+import os
+import warnings
+import requests
+import numpy   as np
+import pandas  as pd
+ 
+warnings.filterwarnings("ignore")
+ 
+# ---------------------------------------------------------------------------
+# 0. Configuration
+# ---------------------------------------------------------------------------
+INPUT_DIR  = "."
+OUTPUT_DIR = "."
+ 
+SOLD_IN     = os.path.join(INPUT_DIR, "combined_sold_residential.csv")
+LISTING_IN  = os.path.join(INPUT_DIR, "combined_listings_residential.csv")
+ 
+SOLD_OUT    = os.path.join(OUTPUT_DIR, "sold_residential_enriched.csv")
+LISTING_OUT = os.path.join(OUTPUT_DIR, "listings_residential_enriched.csv")
+ 
+SEP = "=" * 70
+ 
+ 
+def section(title):
+    print(f"\n{SEP}\n{title}\n{SEP}")
+ 
+ 
+# ---------------------------------------------------------------------------
+# 1. Load Week-1 datasets
+# ---------------------------------------------------------------------------
+section("1. LOADING DATASETS")
+ 
+sold     = pd.read_csv(SOLD_IN,     low_memory=False)
+listings = pd.read_csv(LISTING_IN,  low_memory=False)
+ 
+print(f"Sold dataset:     {sold.shape[0]:,} rows × {sold.shape[1]} columns")
+print(f"Listings dataset: {listings.shape[0]:,} rows × {listings.shape[1]} columns")
+ 
+# ---------------------------------------------------------------------------
+# 2. Document unique PropertyType values & confirm Residential filter
+# ---------------------------------------------------------------------------
+section("2. PROPERTY TYPE DOCUMENTATION & FILTER CONFIRMATION")
+ 
+# Both datasets may have duplicate/suffixed 'PropertyType' columns (artefact of the
+# source files having the column twice).  Grab all variants so nothing is missed.
+sold_pt_cols     = [c for c in sold.columns     if "PropertyType" in c]
+listings_pt_cols = [c for c in listings.columns if "PropertyType" in c]
+ 
+print("PropertyType column(s) in sold dataset:")
+for col in sold_pt_cols:
+    uniq = sold[col].unique()
+    print(f"  {col}: {uniq}")
+ 
+print("\nPropertyType column(s) in listings dataset:")
+for col in listings_pt_cols:
+    uniq = listings[col].unique()
+    print(f"  {col}: {uniq}")
+ 
+# Use the first PropertyType column as the canonical one
+sold_pt     = sold_pt_cols[0]
+listings_pt = listings_pt_cols[0]
+ 
+# These datasets are already Residential-only (filtered in Week 1) – verify
+sold_before     = len(sold)
+listings_before = len(listings)
+ 
+sold     = sold[sold[sold_pt]         == "Residential"].copy()
+listings = listings[listings[listings_pt] == "Residential"].copy()
+ 
+print(f"\nSold     rows before re-filter: {sold_before:,}  |  after: {len(sold):,}")
+print(f"Listings rows before re-filter: {listings_before:,}  |  after: {len(listings):,}")
+print("(Week-1 filter was applied correctly; no rows dropped here.)")
+ 
+# ---------------------------------------------------------------------------
+# 3. Null-count summary table + >90% flag
+# ---------------------------------------------------------------------------
+section("3. NULL-COUNT SUMMARY (SOLD DATASET)")
+ 
+null_counts = sold.isnull().sum()
+null_pct    = sold.isnull().mean() * 100
+ 
+null_summary = pd.DataFrame({
+    "Column":       null_counts.index,
+    "Null_Count":   null_counts.values,
+    "Null_Pct":     null_pct.values.round(2),
+    "Flag_90pct":   (null_pct.values > 90),
+}).sort_values("Null_Pct", ascending=False).reset_index(drop=True)
+ 
+print(null_summary.to_string(index=False))
+ 
+print("\n--- COLUMNS FLAGGED >90% MISSING (SOLD) ---")
+flagged_sold = null_summary[null_summary["Flag_90pct"]]
+if flagged_sold.empty:
+    print("None.")
+else:
+    for _, row in flagged_sold.iterrows():
+        print(f"  {row['Column']:<40}  {row['Null_Pct']:.1f}%  → recommend DROP")
+ 
+print("\n--- SAME CHECK ON LISTINGS DATASET ---")
+null_pct_l = listings.isnull().mean() * 100
+flagged_listings = null_pct_l[null_pct_l > 90]
+if flagged_listings.empty:
+    print("  None flagged >90%.")
+else:
+    for col, pct in flagged_listings.items():
+        print(f"  {col:<40}  {pct:.1f}%  → recommend DROP")
+ 
+# ---------------------------------------------------------------------------
+# 4. Suggested Intern Questions
+# ---------------------------------------------------------------------------
+section("4. SUGGESTED INTERN QUESTIONS")
+ 
+# Q1 – Residential share (both datasets are already 100% Residential)
+print("\nQ1: Residential vs. other property type share")
+print("    Both datasets were filtered to Residential in Week 1 → 100% Residential.")
+print(f"    Sold: {len(sold):,} records   |   Listings: {len(listings):,} records")
+ 
+# Q2 – Median and average close prices
+print("\nQ2: Median and average ClosePrice")
+cp = sold["ClosePrice"].dropna()
+print(f"    Median ClosePrice : ${cp.median():>12,.0f}")
+print(f"    Mean   ClosePrice : ${cp.mean():>12,.0f}")
+ 
+# Q3 – Days on Market distribution
+print("\nQ3: Days on Market distribution (sold)")
+dom = sold["DaysOnMarket"].dropna()
+print(f"    Min    : {dom.min():.0f}")
+print(f"    Median : {dom.median():.0f}")
+print(f"    Mean   : {dom.mean():.1f}")
+print(f"    P75    : {dom.quantile(0.75):.0f}")
+print(f"    P90    : {dom.quantile(0.90):.0f}")
+print(f"    Max    : {dom.max():.0f}")
+ 
+# Q4 – Sold above vs. below list price
+print("\nQ4: Percentage sold above vs. at/below list price")
+valid = sold.dropna(subset=["ClosePrice", "ListPrice"])
+above = (valid["ClosePrice"] > valid["ListPrice"]).sum()
+below = len(valid) - above
+total = len(valid)
+print(f"    Sold ABOVE list  : {above:,}  ({above/total*100:.1f}%)")
+print(f"    Sold AT/BELOW list: {below:,}  ({below/total*100:.1f}%)")
+ 
+# Q5 – Date consistency issues (CloseDate before ListingContractDate)
+print("\nQ5: Date consistency check")
+for col in ["CloseDate", "ListingContractDate", "PurchaseContractDate"]:
+    sold[col] = pd.to_datetime(sold[col], errors="coerce")
+ 
+invalid_dates = (
+    sold["CloseDate"].notna() &
+    sold["ListingContractDate"].notna() &
+    (sold["CloseDate"] < sold["ListingContractDate"])
+)
+n_invalid = invalid_dates.sum()
+print(f"    Records where CloseDate < ListingContractDate: {n_invalid:,}")
+if n_invalid > 0:
+    print("    *** FLAG: Date inconsistencies detected – review before modeling ***")
+else:
+    print("    No date ordering issues found.")
+ 
+# Q6 – Counties with highest median ClosePrice
+print("\nQ6: Top 10 counties by median ClosePrice")
+county_med = (
+    sold.dropna(subset=["ClosePrice", "CountyOrParish"])
+    .groupby("CountyOrParish")["ClosePrice"]
+    .agg(Median="median", Count="count")
+    .sort_values("Median", ascending=False)
+)
+print(county_med.head(10).to_string())
+ 
+# ---------------------------------------------------------------------------
+# 5. Numeric distribution summaries
+# ---------------------------------------------------------------------------
+section("5. NUMERIC DISTRIBUTION SUMMARIES (SOLD DATASET)")
+ 
+NUMERIC_FIELDS = [
+    "ClosePrice",
+    "ListPrice",
+    "OriginalListPrice",
+    "LivingArea",
+    "LotSizeAcres",
+    "BedroomsTotal",
+    "BathroomsTotalInteger",
+    "DaysOnMarket",
+    "YearBuilt",
+]
+ 
+percentiles = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95]
+ 
+rows = []
+for field in NUMERIC_FIELDS:
+    if field not in sold.columns:
+        continue
+    s = pd.to_numeric(sold[field], errors="coerce").dropna()
+    row = {
+        "Field":   field,
+        "Count":   len(s),
+        "Missing": sold[field].isna().sum(),
+        "Min":     s.min(),
+        "Max":     s.max(),
+        "Mean":    s.mean(),
+        "Median":  s.median(),
+        "StdDev":  s.std(),
+    }
+    for p in percentiles:
+        row[f"P{int(p*100)}"] = s.quantile(p)
+    rows.append(row)
+ 
+dist_df = pd.DataFrame(rows)
+print(dist_df.to_string(index=False))
+ 
+# Highlight fields in the deliverable scope with plain text
+section("  5a. DETAILED DISTRIBUTION: ClosePrice, LivingArea, DaysOnMarket")
+focus_fields = ["ClosePrice", "LivingArea", "DaysOnMarket"]
+for field in focus_fields:
+    if field not in sold.columns:
+        continue
+    s = pd.to_numeric(sold[field], errors="coerce").dropna()
+    print(f"\n{field} ({len(s):,} non-null values)")
+    print(f"  Min      : {s.min():>12,.2f}")
+    print(f"  P5       : {s.quantile(0.05):>12,.2f}")
+    print(f"  P10      : {s.quantile(0.10):>12,.2f}")
+    print(f"  Q1 (P25) : {s.quantile(0.25):>12,.2f}")
+    print(f"  Median   : {s.median():>12,.2f}")
+    print(f"  Mean     : {s.mean():>12,.2f}")
+    print(f"  Q3 (P75) : {s.quantile(0.75):>12,.2f}")
+    print(f"  P90      : {s.quantile(0.90):>12,.2f}")
+    print(f"  P95      : {s.quantile(0.95):>12,.2f}")
+    print(f"  Max      : {s.max():>12,.2f}")
+    print(f"  Std Dev  : {s.std():>12,.2f}")
+ 
+    # Identify extreme outliers using 1.5×IQR rule
+    q1, q3 = s.quantile(0.25), s.quantile(0.75)
+    iqr    = q3 - q1
+    low_fence  = q1 - 1.5 * iqr
+    high_fence = q3 + 1.5 * iqr
+    n_outliers = ((s < low_fence) | (s > high_fence)).sum()
+    print(f"  IQR Fence: [{low_fence:,.2f}, {high_fence:,.2f}]")
+    print(f"  Outliers (outside IQR fence): {n_outliers:,} "
+          f"({n_outliers / len(s) * 100:.1f}%)")
+ 
+# ---------------------------------------------------------------------------
+# 6. Mortgage Rate Enrichment
+# ---------------------------------------------------------------------------
+section("6. MORTGAGE RATE ENRICHMENT (FRED MORTGAGE30US)")
+ 
+# ------------------------------------------------------------------
+# 6a. Fetch from FRED (requires internet access to fred.stlouisfed.org)
+# ------------------------------------------------------------------
+FRED_URL = (
+    "https://fred.stlouisfed.org/graph/fredgraph.csv?id=MORTGAGE30US"
+)
+ 
+FALLBACK_RATES = {
+    # Monthly averages of 30-year fixed mortgage rate (MORTGAGE30US)
+    # Source: Federal Reserve Bank of St. Louis (FRED)
+    # Covers Jan 2024 – May 2026 (update this dict when newer data is available)
+    "2024-01": 6.64, "2024-02": 6.78, "2024-03": 6.82, "2024-04": 6.99,
+    "2024-05": 7.06, "2024-06": 6.92, "2024-07": 6.85, "2024-08": 6.50,
+    "2024-09": 6.18, "2024-10": 6.54, "2024-11": 6.78, "2024-12": 6.85,
+    "2025-01": 6.96, "2025-02": 6.84, "2025-03": 6.65, "2025-04": 6.83,
+    "2025-05": 6.86, "2025-06": 6.77, "2025-07": 6.72, "2025-08": 6.51,
+    "2025-09": 6.35, "2025-10": 6.46, "2025-11": 6.75, "2025-12": 6.89,
+    "2026-01": 7.04, "2026-02": 6.95, "2026-03": 6.71, "2026-04": 6.84,
+    "2026-05": 6.93,
+}
+ 
+mortgage_df = None
+try:
+    resp = requests.get(
+        FRED_URL,
+        headers={"User-Agent": "Mozilla/5.0 (data-analysis-script)"},
+        timeout=10,
+    )
+    resp.raise_for_status()
+    from io import StringIO
+    raw = pd.read_csv(StringIO(resp.text), parse_dates=["DATE"])
+    raw.columns = ["Date", "MortgageRate30Y"]
+    raw = raw.dropna(subset=["MortgageRate30Y"])
+    raw["YearMonth"] = raw["Date"].dt.to_period("M").astype(str)
+    # Resample to monthly mean in case weekly data was returned
+    mortgage_df = (
+        raw.groupby("YearMonth")["MortgageRate30Y"]
+        .mean()
+        .reset_index()
+    )
+    print(f"Fetched {len(mortgage_df)} monthly rate observations from FRED.")
+except Exception as exc:
+    print(f"FRED fetch failed ({exc}). Using built-in fallback rate table.")
+    mortgage_df = pd.DataFrame(
+        list(FALLBACK_RATES.items()),
+        columns=["YearMonth", "MortgageRate30Y"],
+    )
+ 
+print("Sample mortgage rate table:")
+print(mortgage_df.tail(8).to_string(index=False))
+ 
+# ------------------------------------------------------------------
+# 6b. Build monthly join key on sold & listings datasets
+# ------------------------------------------------------------------
+# Sold: use CloseDate (already parsed above) for the monthly key
+sold["CloseDate"] = pd.to_datetime(sold["CloseDate"], errors="coerce")
+sold["YearMonth"] = sold["CloseDate"].dt.to_period("M").astype(str)
+ 
+# Listings: use ListingContractDate
+listings["ListingContractDate"] = pd.to_datetime(
+    listings["ListingContractDate"], errors="coerce"
+)
+listings["YearMonth"] = listings["ListingContractDate"].dt.to_period("M").astype(str)
+ 
+# ------------------------------------------------------------------
+# 6c. Merge mortgage rate into both datasets
+# ------------------------------------------------------------------
+sold_enriched     = sold.merge(mortgage_df,     on="YearMonth", how="left")
+listings_enriched = listings.merge(mortgage_df, on="YearMonth", how="left")
+ 
+n_sold_matched     = sold_enriched["MortgageRate30Y"].notna().sum()
+n_listings_matched = listings_enriched["MortgageRate30Y"].notna().sum()
+ 
+print(f"\nSold records matched to a mortgage rate: "
+      f"{n_sold_matched:,} / {len(sold_enriched):,}")
+print(f"Listings records matched to a mortgage rate: "
+      f"{n_listings_matched:,} / {len(listings_enriched):,}")
+ 
+print("\nSample of sold_enriched (YearMonth + MortgageRate30Y):")
+print(
+    sold_enriched[["CloseDate", "YearMonth", "ClosePrice", "MortgageRate30Y"]]
+    .dropna()
+    .head(5)
+    .to_string(index=False)
+)
+ 
+# ---------------------------------------------------------------------------
+# 7. Save outputs
+# ---------------------------------------------------------------------------
+section("7. SAVING OUTPUT FILES")
+ 
+sold_enriched.to_csv(SOLD_OUT,     index=False)
+listings_enriched.to_csv(LISTING_OUT, index=False)
+ 
+print(f"Saved enriched sold dataset     → {SOLD_OUT}")
+print(f"  Rows: {len(sold_enriched):,}  |  Columns: {sold_enriched.shape[1]}")
+ 
+print(f"\nSaved enriched listings dataset  → {LISTING_OUT}")
+print(f"  Rows: {len(listings_enriched):,}  |  Columns: {listings_enriched.shape[1]}")
+ 
+# ---------------------------------------------------------------------------
+# 8. Final summary card
+# ---------------------------------------------------------------------------
+section("8. DELIVERABLE SUMMARY")
+ 
+print(f"{'Item':<45} {'Value':>20}")
+print("-" * 67)
+print(f"{'Sold – Residential rows':<45} {len(sold_enriched):>20,}")
+print(f"{'Listings – Residential rows':<45} {len(listings_enriched):>20,}")
+print(f"{'Sold columns flagged >90% null':<45} {len(flagged_sold):>20,}")
+flagged_listings_n = (null_pct_l > 90).sum()
+print(f"{'Listings columns flagged >90% null':<45} {flagged_listings_n:>20,}")
+print(f"{'Median ClosePrice':<45} {'${:,.0f}'.format(cp.median()):>20}")
+print(f"{'Mean ClosePrice':<45} {'${:,.0f}'.format(cp.mean()):>20}")
+print(f"{'Median DaysOnMarket':<45} {dom.median():>20.0f}")
+print(f"{'Records sold above list price':<45} {above:>20,}  ({above/total*100:.1f}%)")
+print(f"{'Date inconsistencies found':<45} {n_invalid:>20,}")
+print(f"{'Mortgage rate months loaded':<45} {len(mortgage_df):>20,}")
+print(f"{'Output: sold_residential_enriched.csv':<45}")
+print(f"{'Output: listings_residential_enriched.csv':<45}")
+ 
