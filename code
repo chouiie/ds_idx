@@ -1,0 +1,102 @@
+import glob
+import os
+import re
+ 
+import pandas as pd
+ 
+
+INPUT_DIR = "."          
+OUTPUT_DIR = "."         
+ 
+LISTING_OUT_PATH = os.path.join(OUTPUT_DIR, "combined_listings_residential.csv")
+SOLD_OUT_PATH = os.path.join(OUTPUT_DIR, "combined_sold_residential.csv")
+ 
+ 
+def find_monthly_files(input_dir, keyword):
+
+    
+    pattern = os.path.join(input_dir, f"*CRMLS{keyword}*.csv")
+    files = glob.glob(pattern)
+ 
+    def extract_yyyymm(path):
+        match = re.search(rf"CRMLS{keyword}(\d{{6}})\.csv", os.path.basename(path))
+        return match.group(1) if match else "000000"
+ 
+    files.sort(key=extract_yyyymm)
+    return files
+ 
+ 
+def load_and_concat(files, label):
+    dataframes = []
+    total_individual_rows = 0
+ 
+    for f in files:
+        df = pd.read_csv(f, low_memory=False)
+        print(f"  Loaded {os.path.basename(f)}: {len(df):,} rows")
+        total_individual_rows += len(df)
+        dataframes.append(df)
+ 
+    combined = pd.concat(dataframes, ignore_index=True)
+ 
+    print(f"  -> {label} rows BEFORE concatenation (sum of monthly files): "
+          f"{total_individual_rows:,}")
+    print(f"  -> {label} rows AFTER concatenation: {len(combined):,}")
+ 
+    return combined
+ 
+ 
+def filter_residential(df, label):
+    """Filter a dataframe down to PropertyType == 'Residential'."""
+    before_rows = len(df)
+    filtered = df[df["PropertyType"] == "Residential"].copy()
+    after_rows = len(filtered)
+ 
+    print(f"  -> {label} rows BEFORE Residential filter: {before_rows:,}")
+    print(f"  -> {label} rows AFTER Residential filter:  {after_rows:,}")
+ 
+    return filtered
+ 
+ 
+
+print("=" * 70)
+print("LISTING DATA")
+print("=" * 70)
+ 
+listing_files = find_monthly_files(INPUT_DIR, "Listing")
+print(f"Found {len(listing_files)} monthly listing file(s):")
+for f in listing_files:
+    print(f"  - {os.path.basename(f)}")
+ 
+listings_combined = load_and_concat(listing_files, "Listing")
+listings_residential = filter_residential(listings_combined, "Listing")
+ 
+listings_residential.to_csv(LISTING_OUT_PATH, index=False)
+print(f"Saved combined, Residential-only listings dataset to: {LISTING_OUT_PATH}")
+ 
+
+print()
+print("=" * 70)
+print("SOLD DATA")
+print("=" * 70)
+ 
+sold_files = find_monthly_files(INPUT_DIR, "Sold")
+print(f"Found {len(sold_files)} monthly sold file(s):")
+for f in sold_files:
+    print(f"  - {os.path.basename(f)}")
+ 
+sold_combined = load_and_concat(sold_files, "Sold")
+sold_residential = filter_residential(sold_combined, "Sold")
+ 
+sold_residential.to_csv(SOLD_OUT_PATH, index=False)
+print(f"Saved combined, Residential-only sold dataset to: {SOLD_OUT_PATH}")
+ 
+
+print()
+print("=" * 70)
+print("SUMMARY")
+print("=" * 70)
+print(f"Listings - combined (pre-filter): {len(listings_combined):,} rows")
+print(f"Listings - Residential only:      {len(listings_residential):,} rows")
+print(f"Sold     - combined (pre-filter): {len(sold_combined):,} rows")
+print(f"Sold     - Residential only:      {len(sold_residential):,} rows")
+ 
