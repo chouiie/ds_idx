@@ -1,3 +1,4 @@
 .DS_Store
 *.csv
+!sold_residential_cleaned.csv
 .venv/
